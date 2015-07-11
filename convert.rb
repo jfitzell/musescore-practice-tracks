@@ -121,12 +121,18 @@ class Part
 	end
 end
 
-def convert(scorePath, mp3Path)
+def convert(scorePath, mp3Path, tags={})
 	midiPath = mp3Path.sub_ext('.mid')
 	puts "Converting score to MIDI: #{midiPath}"
 	system "'/Applications/MuseScore 2.app/Contents/MacOS/mscore' '#{scorePath}' -o '#{midiPath}' 2> /dev/null"
+
 	puts "Converting MIDI to MP3: #{mp3Path}"
- 	system "timidity -EI0 '#{midiPath}' -x'soundfont #{SOUNDFONT}' -A100 -Ow -o - 2> /dev/null | lame - '#{mp3Path}'"
+	tagOptions = []
+	tagOptions << "--tg '#{tags[:genre]}'" if tags.has_key? :genre
+	tagOptions << "--tl '#{tags[:album]}'" if tags.has_key? :album
+	tagOptions << "--ta '#{tags[:artist]}'" if tags.has_key? :artist
+	tagOptions << "--tt '#{tags[:title]}'" if tags.has_key? :title
+ 	system "timidity -EI0 '#{midiPath}' -x'soundfont #{SOUNDFONT}' -A300 -Ow -o - 2> /dev/null | lame #{tagOptions.join(' ')} - '#{mp3Path}'"
 	puts "Cleaning up..."
 	midiPath.delete
 # 	IO.copy_stream(scorePath, mp3Path.sub_ext('.mscz'))
@@ -136,11 +142,12 @@ def create_modified_track(sourceFile, outputFile)
 	Tempfile.open [File.basename(sourceFile), File.extname(sourceFile)] do |temp|
 		IO.copy_stream(sourceFile, temp)
 		
+		tags = {:genre => 'Chorus', :artist => 'News Choir'}
 		Zip::File.open(temp) do |zip|
 			source = zip.glob('*.mscx').first
 			doc = source.get_input_stream { |io| Nokogiri::XML(io) }
 
-			yield doc
+			yield doc, tags
 			
 			zip.get_output_stream(source.name) do |io|
 				doc.write_to(io)
@@ -150,12 +157,20 @@ def create_modified_track(sourceFile, outputFile)
 		
 # 		puts temp.path
 # 		sleep 20
-		convert(temp.path, outputFile)
+		convert(temp.path, outputFile, tags)
 	end
 end
 
+# should be a method of a class called Score
+def get_title(doc, default)
+	titleTag = doc.at_xpath('//Score/metaTag[@name="workTitle"]')
+	return (titleTag && !titleTag.content.empty?) ?
+		titleTag.content :
+		default
+end
+
 def create_solo_track(partIndex, sourceFile, outputFile)
-	 create_modified_track(sourceFile, outputFile) do |doc|
+	 create_modified_track(sourceFile, outputFile) do |doc, tags|
 		parts = Part.create_all(doc)
 		solo = parts[partIndex]
 		vocals = parts.select { |p| p != solo && p.vocal? }
@@ -163,6 +178,10 @@ def create_solo_track(partIndex, sourceFile, outputFile)
 		
 		# BUG: Solo doesn't apply during to export
 		#  https://musescore.org/en/node/21854
+		
+		title = get_title(doc, File.basename(sourceFile, '.mscz'))
+		tags[:album] = "Practice: #{title}"
+		tags[:title] = "#{solo.name} (Solo) - #{title}"
 		
 # 		puts "Muting all except #{solo.name}..."
 		parts.each { |p| p.mute!.unsolo!.volume = 0 }
@@ -173,11 +192,15 @@ def create_solo_track(partIndex, sourceFile, outputFile)
 end
 
 def create_dominant_track(partIndex, sourceFile, outputFile)
-	 create_modified_track(sourceFile, outputFile) do |doc|
+	 create_modified_track(sourceFile, outputFile) do |doc, tags|
 		parts = Part.create_all(doc)
 		dominant = parts[partIndex]
 		vocals = parts.select { |p| p != dominant && p.vocal? }
 		others = parts - vocals - [dominant]
+		
+		title = get_title(doc, File.basename(sourceFile, '.mscz'))
+		tags[:album] = "Practice: #{title}"
+		tags[:title] = "#{dominant.name} (Dominant) - #{title}"
 		
 		parts.each { |p| p.unsolo! }
 		vocals.each do |p|
@@ -206,10 +229,13 @@ Pathname.glob('/Users/julian/Documents/MuseScore2/Scores/*.mscz') do |compressed
 	
 		vocals = parts.each_index.select { |i| parts[i].vocal? && not(parts[i].empty?) }
 		vocals.each do |i|
-			create_solo_track(i, compressedFile, compressedFile.sub_ext("-#{parts[i].name.gsub(/\W/, '_')}-solo.mp3"))
-			create_dominant_track(i, compressedFile, compressedFile.sub_ext("-#{parts[i].name.gsub(/\W/, '_')}-dominant.mp3"))
+			create_solo_track(i, compressedFile, compressedFile.sub_ext("-#{parts[i].name.gsub(/[^ \w]/, '_')}-solo.mp3"))
+			create_dominant_track(i, compressedFile, compressedFile.sub_ext("-#{parts[i].name.gsub(/[^ \w]/, '_')}-dominant.mp3"))
 		end
 	
-		convert(compressedFile, compressedFile.sub_ext('.mp3'))
+		title = get_title(doc, File.basename(compressedFile, '.mscz'))
+		convert(compressedFile, compressedFile.sub_ext('.mp3'),
+			{:artist => 'News Choir', :genre => 'Chorus',
+			:album => "Practice: #{title}", :title => title})
 	end
 end
